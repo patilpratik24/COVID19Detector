@@ -1,18 +1,30 @@
 package com.example.covid19detector;
 
+import android.annotation.SuppressLint;
+import android.app.AlertDialog;
+import android.content.DialogInterface;
 import android.content.Intent;
 import android.content.res.AssetFileDescriptor;
 import android.graphics.Bitmap;
+import android.graphics.Color;
 import android.graphics.Matrix;
 import android.graphics.drawable.BitmapDrawable;
 import android.net.Uri;
+import android.os.AsyncTask;
+import android.os.StrictMode;
 import android.os.SystemClock;
 import android.provider.MediaStore;
 import android.os.Bundle;
+import android.text.SpannableStringBuilder;
+import android.text.Spanned;
+import android.text.style.ForegroundColorSpan;
+import android.util.Log;
 import android.view.View;
 import android.widget.Button;
 import android.widget.ImageView;
+import android.widget.ProgressBar;
 import android.widget.TextView;
+import android.widget.Toast;
 
 import androidx.appcompat.app.AppCompatActivity;
 
@@ -26,6 +38,11 @@ import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.MappedByteBuffer;
 import java.nio.channels.FileChannel;
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.Statement;
 import java.util.AbstractMap;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -35,6 +52,10 @@ import java.util.Map;
 import java.util.PriorityQueue;
 
 public class Classify extends AppCompatActivity {
+
+    public Connection con;
+    private String name, age, gen, diabetic, heart, anyOther;
+    boolean profile;
 
     // presets for rgb conversion
     private static final int RESULTS_TO_SHOW = 3;
@@ -61,6 +82,7 @@ public class Classify extends AppCompatActivity {
 
     // selected classifier information received from extras
     private String chosen;
+    private String result;
 
 
     // input image dimensions for the Inception Model
@@ -80,6 +102,7 @@ public class Classify extends AppCompatActivity {
 
     private TextView Confidence1;
     private TextView Confidence2;
+    private ProgressBar progressBar2;
 
 
     // priority queue that will hold the top results from the CNN
@@ -96,7 +119,7 @@ public class Classify extends AppCompatActivity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         // get all selected classifier data from classifiers
-        chosen = (String) getIntent().getStringExtra("chosen");
+        chosen = "model_unquant.tflite";
 
 
         // initialize array that holds image data
@@ -107,7 +130,7 @@ public class Classify extends AppCompatActivity {
         //initialize graph and labels
         try{
             tflite = new Interpreter(loadModelFile());
-            //labelList = Arrays.asList(new String[]{"Covid"});
+            labelList = loadLabelList();
         } catch (Exception ex){
             ex.printStackTrace();
         }
@@ -122,10 +145,17 @@ public class Classify extends AppCompatActivity {
 
         // initialize probabilities array. The data types that array holds depends if the input data needs to be quantized or not
 
-        outputVal = new float[1][1];
+        outputVal = new float[1][2];
 
 
         setContentView(R.layout.activity_classify);
+
+        name = (String) getIntent().getStringExtra("name");
+        age = (String) getIntent().getStringExtra("age");
+        gen = (String) getIntent().getStringExtra("gen");
+        diabetic = (String) getIntent().getStringExtra("diabetic");
+        heart = (String) getIntent().getStringExtra("heart");
+        anyOther = (String) getIntent().getStringExtra("anyOther");
 
         // labels that hold top three results of CNN
         label1 = (TextView) findViewById(R.id.label1);
@@ -134,6 +164,8 @@ public class Classify extends AppCompatActivity {
         // displays the probabilities of top labels
         Confidence1 = (TextView) findViewById(R.id.Confidence1);
         Confidence2 = (TextView) findViewById(R.id.Confidence2);
+
+        progressBar2 = (ProgressBar)findViewById(R.id.progressBar2);
 
         // initialize imageView that displays selected image to the user
         selected_image = (ImageView) findViewById(R.id.selected_image);
@@ -168,14 +200,40 @@ public class Classify extends AppCompatActivity {
                 // pass byte data to the graph
                 tflite.run(imgData, outputVal);
 
-                float inferedValue = outputVal[0][0];
+                float inferedValue1 = outputVal[0][0];
+                float inferedValue2 = outputVal[0][1];
                 String finalAns;
+                label1.setText("1. Covid");
+                label2.setText("2. Normal");
+
+                Confidence1.setText(String.format("%.0f%%", inferedValue1 * 100));
+                Confidence2.setText(String.format("%.0f%%", inferedValue2 * 100));
+                if((inferedValue1*100)>50)
+                {
+                    result = "Covid";
+                }
+
+                else
+                {
+                    result = "Normal";
+                }
+
+                CheckLogin checkLogin = new CheckLogin();
+                checkLogin.execute("");
+
+                if(Integer.parseInt(age)>59 || diabetic.equals("Yes") || heart.equals("Yes"))
+                {
+                    profile = true;
+                }
+                //Toast.makeText(Classify.this,diabetic + heart+String.valueOf(profile),Toast.LENGTH_SHORT).show();
 
 
-                label1.setText(Float.toString(inferedValue));
+                if (profile && result.equals("Covid"))
+                {
+                    openDialog();
+                }
 
-                // display the results
-                //printTopKLabels();
+
             }
         });
 
@@ -279,5 +337,149 @@ public class Classify extends AppCompatActivity {
         Bitmap resizedBitmap = Bitmap.createBitmap(
                 bm, 0, 0, width, height, matrix, false);
         return resizedBitmap;
+    }
+
+
+    public class CheckLogin extends AsyncTask<String, String, String>
+    {
+        String z = "";
+        Boolean isSuccess = false;
+        String name1 = "";
+
+        protected void onPreExecute()
+        {
+            progressBar2.setVisibility(View.VISIBLE);
+        }
+        @Override
+        protected void onPostExecute(String r)
+        {
+            progressBar2.setVisibility(View.GONE);
+            Toast.makeText(Classify.this,r,Toast.LENGTH_SHORT).show();
+            if(isSuccess)
+            {
+                Toast.makeText(Classify.this,"Data successfully sent to server",Toast.LENGTH_SHORT).show();
+            }
+        }
+
+        protected String doInBackground(String... params) {
+
+            try {
+                con = connectionclass();
+                if(con == null)
+                {
+                    z = "Check Your Internet Access";
+
+                }
+
+                else
+                {
+                    String query = "Insert into medicalinfo " +
+                            " (name,age,gen,diabetic,heart,anyOther,result) values "
+                            + "('"
+                            + name
+                            + "','"
+                            + age
+                            + "','"
+                            + gen
+                            + "','"
+                            + diabetic
+                            + "','"
+                            + heart
+                            + "','"
+                            + anyOther
+                            + "','"
+                            + result
+                            + "')";
+
+                    Statement stmt = con.createStatement();
+                    ResultSet rs = stmt.executeQuery(query);
+                    if (rs.next())
+                    {
+                        name1 = rs.getString("name");
+                        z = "Query Executed Successfully";
+                    }
+
+                    else
+                    {
+                        z = "Invalid Query";
+                        isSuccess = false;
+                    }
+
+                }
+            }
+            catch (Exception ex)
+            {
+                isSuccess = false;
+                z = ex.getMessage();
+                Log.d("SQL Error", z);
+            }
+
+            return z;
+        }
+    }
+
+
+    @SuppressLint("NewApi")
+    public Connection connectionclass(){
+
+        StrictMode.ThreadPolicy policy = new StrictMode.ThreadPolicy.Builder().permitAll().build();
+        StrictMode.setThreadPolicy(policy);
+        Connection connection = null;
+        String ConnectionURL = null;
+        try {
+            Class.forName("net.sourceforge.jtds.jdbc.Driver");
+            ConnectionURL = "jdbc:jtds:sqlserver://patilpratik24p.database.windows.net:1433;DatabaseName=personsinfo;user=pratik@patilpratik24p;password=@!17428343Pp;encrypt=true;trustServerCertificate=false;hostNameInCertificate=*.database.windows.net;loginTimeout=30;";
+            connection = DriverManager.getConnection(ConnectionURL);
+        }
+        catch (SQLException se)
+        {
+            Log.e("Error here 1: " , se.getMessage());
+        }
+        catch (ClassNotFoundException e)
+        {
+            Log.e("Error here 2: ",e.getMessage());
+        }
+        catch (Exception e)
+        {
+            Log.e("Error here 3: ", e.getMessage());
+        }
+        return  connection;
+
+    }
+
+    public void openDialog(){
+        AlertDialog alertDialog1 = new AlertDialog.Builder(
+                Classify.this).create();
+        String titleText = "Health Emergency!";
+        ForegroundColorSpan foregroundColorSpan = new ForegroundColorSpan(Color.RED);
+        SpannableStringBuilder ssBuilder = new SpannableStringBuilder(titleText);
+        ssBuilder.setSpan(
+                foregroundColorSpan,
+                0,
+                titleText.length(),
+                Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+        );
+
+
+        // Setting Dialog Title
+        alertDialog1.setTitle(ssBuilder);
+
+        // Setting Dialog Message
+        alertDialog1.setMessage("Please Visit Your Nearest Hospital");
+
+
+        // Setting OK Button
+        alertDialog1.setButton("Okay", new DialogInterface.OnClickListener() {
+
+            public void onClick(DialogInterface dialog, int which) {
+                // Write your code here to execute after dialog
+                // closed
+                Toast.makeText(getApplicationContext(),
+                        "Wishing you a speedy recovery. Take Care.", Toast.LENGTH_SHORT).show();
+            }
+        });
+
+        // Showing Alert Message
+        alertDialog1.show();
     }
 }
